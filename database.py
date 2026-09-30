@@ -1,9 +1,19 @@
 import sqlite3
 import json
 import os
+import shutil
 from datetime import datetime
 
 DB_PATH = os.path.join(os.path.dirname(__file__), "knowledge_hub.db")
+BASE_DIR = os.path.dirname(__file__)
+
+PENDING_DIR = os.path.join(BASE_DIR, "pending_documents")
+APPROVED_DIR = os.path.join(BASE_DIR, "approved_documents")
+REJECTED_DIR = os.path.join(BASE_DIR, "rejected_documents")
+
+def init_folders():
+    for d in [PENDING_DIR, APPROVED_DIR, REJECTED_DIR]:
+        os.makedirs(d, exist_ok=True)
 
 def get_connection():
     conn = sqlite3.connect(DB_PATH)
@@ -11,6 +21,7 @@ def get_connection():
     return conn
 
 def init_db():
+    init_folders()
     conn = get_connection()
     cursor = conn.cursor()
     
@@ -19,6 +30,7 @@ def init_db():
     CREATE TABLE IF NOT EXISTS documents (
         id TEXT PRIMARY KEY,
         title TEXT NOT NULL,
+        file_path TEXT,
         category TEXT,
         region TEXT,
         author TEXT,
@@ -35,7 +47,14 @@ def init_db():
     );
     """)
 
-    # Experts Directory for Smart Routing
+    # Migration check for existing DB files
+    try:
+        cursor.execute("ALTER TABLE documents ADD COLUMN file_path TEXT;")
+        conn.commit()
+    except Exception:
+        pass
+
+    # Experts Directory
     cursor.execute("""
     CREATE TABLE IF NOT EXISTS experts (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -47,7 +66,7 @@ def init_db():
     );
     """)
 
-    # RAG Query Audit & Escalation Log
+    # Query Logs
     cursor.execute("""
     CREATE TABLE IF NOT EXISTS query_logs (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -62,97 +81,99 @@ def init_db():
 
     conn.commit()
 
-    # Seed initial Experts if empty
-    cursor.execute("SELECT COUNT(*) FROM experts;")
-    if cursor.fetchone()[0] == 0:
-        seed_experts = [
-            ("Marc Peeters", "Senior Payroll Legal Specialist", "Payroll & Tax Compliance (BE)", "marc.peeters@sdworx.com", "#be-payroll-legal"),
-            ("Sophie Laurent", "HR Policy Lead", "Remote Work & Employee Benefits", "sophie.laurent@sdworx.com", "#hr-policies"),
-            ("Jan Van Damme", "International Mobility Specialist", "Cross-Border Tax & Mobility", "jan.vandamme@sdworx.com", "#global-mobility"),
-            ("Elena Rostova", "Data Compliance Officer", "GDPR & Document Governance", "elena.rostova@sdworx.com", "#compliance-governance")
-        ]
-        cursor.executemany(
-            "INSERT INTO experts (name, role, domain, email, teams_channel) VALUES (?, ?, ?, ?, ?)",
-            seed_experts
-        )
-        conn.commit()
-
-    # Seed initial documents if empty
-    cursor.execute("SELECT COUNT(*) FROM documents;")
-    if cursor.fetchone()[0] == 0:
-        seed_documents = [
-            (
-                "doc_001",
-                "Belgium Statutory Remote Work Policy 2026.pdf",
-                "Payroll & Tax",
-                "Belgium",
-                "Sarah Devos",
-                "2026-01-15",
-                "APPROVED",
-                "Official 2026 statutory guidelines for Belgian employees performing structural telework. The maximum tax-exempt home office allowance is set to €154.00 per month starting January 1, 2026. Employers may additionally grant an internet allowance of up to €20.00 per month if specific telework agreements are registered.",
-                "Official 2026 Belgian remote work tax allowance document (€154/mo office + €20/mo internet).",
-                0.96,
-                json.dumps([]),
-                "Marc Peeters (Senior Legal Specialist)",
-                "Verified against Belgian Federal Gazette Q1 2026.",
-                "2026-01-18",
-                "Verified Official Policy"
-            ),
-            (
-                "doc_002",
-                "Legacy 2024 Home Allowance Guidance.pdf",
-                "Payroll & Tax",
-                "Belgium",
-                "Anonymous",
-                "2024-03-10",
-                "SUPERSEDED",
-                "The monthly home office allowance for Belgian employees is €148.45 per month. Applicable for tax year 2024.",
-                "Outdated 2024 home allowance rate of €148.45.",
-                0.40,
-                json.dumps(["SUPERSEDED_BY_DOC_001", "Rate change detected: €148.45 vs €154.00"]),
-                "Marc Peeters",
-                "Marked as superseded by Doc_001 (2026 updated rates).",
-                "2026-01-18",
-                "Superseded / Archival"
-            ),
-            (
-                "doc_003",
-                "Draft Flexible Work Arrangement Policy (Unverified).docx",
-                "HR Policy",
-                "EU General",
-                "Alex Rivera",
-                "2026-09-28",
-                "PENDING_CHECKPOINT",
-                "Proposed guidelines for flexible working hours across EU offices allowing 4-day work weeks subject to local management approval. Requires legal compliance check regarding overtime rules in France and Germany.",
-                "Draft policy for 4-day work week in EU offices under review.",
-                0.62,
-                json.dumps(["Unverified author", "Potential legal conflict with local overtime laws in FR/DE", "Missing formal owner"]),
-                None,
-                None,
-                None,
-                "Unverified Ingestion"
-            )
-        ]
-        cursor.executemany(
-            """INSERT INTO documents 
-            (id, title, category, region, author, upload_date, status, content, summary, ai_confidence_score, ai_audit_flags, credited_owner, expert_notes, verification_date, trust_badge)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
-            seed_documents
-        )
-        conn.commit()
-
+    # Re-seed Experts
+    cursor.execute("DELETE FROM experts;")
+    seed_experts = [
+        ("Jane Doe", "Senior Payroll Legal Specialist", "Payroll & Tax Compliance (BE)", "jane.doe@example.com", "#payroll-legal-help"),
+        ("John Smith", "HR Policy Lead", "Remote Work & Employee Benefits", "john.smith@example.com", "#hr-policy-help"),
+        ("Chris Jordan", "International Mobility Specialist", "Cross-Border Tax & Mobility", "chris.jordan@example.com", "#global-mobility"),
+        ("Morgan Lee", "Data Compliance Officer", "GDPR & Document Governance", "morgan.lee@example.com", "#compliance-governance")
+    ]
+    cursor.executemany(
+        "INSERT INTO experts (name, role, domain, email, teams_channel) VALUES (?, ?, ?, ?, ?)",
+        seed_experts
+    )
+    conn.commit()
     conn.close()
+
+def reset_demo_environment():
+    """
+    Resets the demo environment:
+    1. Moves all files from approved_documents/ and rejected_documents/ back into pending_documents/.
+    2. Clears documents and query logs tables.
+    3. Re-creates initial sample text files in pending_documents/.
+    """
+    init_folders()
+    
+    # 1. Move files back to pending_documents/
+    for src_dir in [APPROVED_DIR, REJECTED_DIR]:
+        if os.path.exists(src_dir):
+            for fname in os.listdir(src_dir):
+                src_file = os.path.join(src_dir, fname)
+                if os.path.isfile(src_file):
+                    dest_file = os.path.join(PENDING_DIR, fname)
+                    try:
+                        shutil.move(src_file, dest_file)
+                    except Exception as e:
+                        print(f"Move reset notice: {e}")
+
+    # 2. Reset database tables
+    conn = get_connection()
+    cursor = conn.cursor()
+    cursor.execute("DELETE FROM documents;")
+    cursor.execute("DELETE FROM query_logs;")
+    conn.commit()
+    conn.close()
+
+    # 3. Create sample pending documents in pending_documents/
+    doc1 = os.path.join(PENDING_DIR, "Belgium_Statutory_Remote_Work_Policy_2026.txt")
+    with open(doc1, "w", encoding="utf-8") as f:
+        f.write(
+            "Official 2026 statutory guidelines for Belgian employees performing structural telework.\n"
+            "Author: Jane Doe\n"
+            "The maximum tax-exempt home office allowance is set to €154.00 per month starting January 1, 2026.\n"
+            "Employers may additionally grant an internet allowance of up to €20.00 per month if specific telework agreements are registered."
+        )
+
+    doc2 = os.path.join(PENDING_DIR, "Draft_Flexible_Work_Policy_2026.txt")
+    with open(doc2, "w", encoding="utf-8") as f:
+        f.write(
+            "Draft Flexible Work & Remote Work Policy (2026 Revision)\n"
+            "Author: John Smith\n"
+            "Region: EU General / Belgium\n\n"
+            "Overview:\n"
+            "This draft proposes allowing employees to choose a 4-day work week (38 hours compressed) subject to department head approval.\n"
+            "Overtime rules in France and Germany require specific opt-in agreements prior to working compressed hours."
+        )
+
+    doc3 = os.path.join(PENDING_DIR, "Proposed_Germany_CrossBorder_Tax_Guide.txt")
+    with open(doc3, "w", encoding="utf-8") as f:
+        f.write(
+            "Proposed Germany-Belgium Cross-Border Tax Guide 2026\n"
+            "Author: Chris Jordan\n"
+            "Region: Germany / Belgium\n\n"
+            "For employees residing in Germany and commuting to work in Belgium, double taxation treaties dictate that salary tax is withheld in the state where activity is physically performed."
+        )
+
+    doc4 = os.path.join(PENDING_DIR, "Legacy_2024_Home_Allowance_Guidance.txt")
+    with open(doc4, "w", encoding="utf-8") as f:
+        f.write(
+            "Legacy 2024 Home Allowance Guidance\n"
+            "Author: Anonymous\n"
+            "The monthly home office allowance for Belgian employees is €148.45 per month. Applicable for tax year 2024."
+        )
 
 def add_document(doc_data):
     conn = get_connection()
     cursor = conn.cursor()
     cursor.execute(
         """INSERT INTO documents 
-        (id, title, category, region, author, upload_date, status, content, summary, ai_confidence_score, ai_audit_flags, credited_owner, expert_notes, verification_date, trust_badge)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+        (id, title, file_path, category, region, author, upload_date, status, content, summary, ai_confidence_score, ai_audit_flags, credited_owner, expert_notes, verification_date, trust_badge)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
         (
             doc_data["id"],
             doc_data["title"],
+            doc_data.get("file_path", ""),
             doc_data.get("category", "General"),
             doc_data.get("region", "Global"),
             doc_data.get("author", "Unknown"),
@@ -214,4 +235,4 @@ def log_query(query, answer, confidence, routed_to_expert, status):
 
 if __name__ == "__main__":
     init_db()
-    print("Database initialized successfully.")
+    print("Database initialized.")
