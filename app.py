@@ -130,7 +130,7 @@ st.markdown("""
         margin-top: 10px;
     }
 </style>
-""", unsafe_allow_class_immutably=True)
+""", unsafe_allow_html=True)
 
 # Application Header
 st.markdown("""
